@@ -473,6 +473,29 @@ Popup {
                         primary: !modelData.controller && modelData.wantsController
                         onClicked: modelData.controller ? panel.link.takeControllerFrom(modelData.peer) : panel.link.giveController(modelData.peer)
                     }
+                    RowLayout {
+                        visible: !modelData.staff
+                        spacing: 6
+                        Label {
+                            text: modelData.usageSeconds > 0
+                                ? qsTr("%1 min remaining").arg(Math.ceil(modelData.usageSeconds / 60))
+                                : qsTr("No time")
+                            font.pixelSize: Theme.fontCaption
+                            color: modelData.usageSeconds > 0 ? Theme.success : Theme.warning
+                        }
+                        PanelButton {
+                            text: qsTr("+15 min")
+                            onClicked: panel.link.grantUsage(modelData.peer, 15)
+                        }
+                        PanelButton {
+                            text: qsTr("+30 min")
+                            onClicked: panel.link.grantUsage(modelData.peer, 30)
+                        }
+                        PanelButton {
+                            text: qsTr("+60 min")
+                            onClicked: panel.link.grantUsage(modelData.peer, 60)
+                        }
+                    }
                     // ไมค์เพื่อน: โผล่เมื่อเพื่อนเปิดไมค์ (หรือถูกปิดเสียงไว้)
                     PanelButton {
                         visible: modelData.mic || modelData.micMuted

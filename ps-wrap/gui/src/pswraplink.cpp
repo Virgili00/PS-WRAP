@@ -931,9 +931,9 @@ ChiakiControllerState padToState(const QJsonObject &o)
 	static const uint32_t kMap[18] = {
 		CHIAKI_CONTROLLER_BUTTON_CROSS, CHIAKI_CONTROLLER_BUTTON_MOON, CHIAKI_CONTROLLER_BUTTON_BOX, CHIAKI_CONTROLLER_BUTTON_PYRAMID,
 		CHIAKI_CONTROLLER_BUTTON_L1, CHIAKI_CONTROLLER_BUTTON_R1, 0, 0,
-		CHIAKI_CONTROLLER_BUTTON_SHARE, CHIAKI_CONTROLLER_BUTTON_OPTIONS, CHIAKI_CONTROLLER_BUTTON_L3, CHIAKI_CONTROLLER_BUTTON_R3,
+		0, CHIAKI_CONTROLLER_BUTTON_OPTIONS, CHIAKI_CONTROLLER_BUTTON_L3, CHIAKI_CONTROLLER_BUTTON_R3,
 		CHIAKI_CONTROLLER_BUTTON_DPAD_UP, CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN, CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT, CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT,
-		CHIAKI_CONTROLLER_BUTTON_PS, CHIAKI_CONTROLLER_BUTTON_TOUCHPAD};
+		0, CHIAKI_CONTROLLER_BUTTON_TOUCHPAD};
 	const uint32_t b = static_cast<uint32_t>(o.value(QStringLiteral("b")).toInteger());
 	for (int i = 0; i < 18; i++)
 		if (b & (1u << i))
@@ -1116,6 +1116,8 @@ struct PsWrapLink::Impl
 	QVariantMap levels;          // คลื่นเสียง: peer → 0..1 (GUI thread)
 	QString lan_ip;              // IP ของการ์ดเน็ตที่ออกเน็ตจริง (route หลัก) — candidate host อื่นทิ้ง
 	QVariantMap starred;         // ดาว: hash → ชื่อล่าสุด (QSettings pswrap/link_starred, GUI thread)
+	QVariantMap usage_credits;    // เครดิตเวลา: hash → วินาทีคงเหลือ (QSettings pswrap/link_usage_credits)
+	QTimer usage_timer;           // ตัดเครดิตของผู้ถือจอยทุกวินาที
 	std::shared_ptr<LinkCamStore> cam_store = std::make_shared<LinkCamStore>();
 	QVariantMap cams;            // facecam: peer → เลขเฟรม (GUI thread)
 	QTimer level_timer;
@@ -1182,6 +1184,7 @@ PsWrapLink::PsWrapLink(QObject *parent, PsWrapRecorder *recorder, std::function<
 #endif
 
 	d->starred = QSettings().value(QStringLiteral("pswrap/link_starred")).toMap();
+	d->usage_credits = QSettings().value(QStringLiteral("pswrap/link_usage_credits")).toMap();
 	{
 		const QString m = QSettings().value(QStringLiteral("pswrap/link_mode")).toString();
 		if (m == QLatin1String("stage") || m == QLatin1String("both"))
@@ -1201,6 +1204,53 @@ PsWrapLink::PsWrapLink(QObject *parent, PsWrapRecorder *recorder, std::function<
 	connect(&d->reconnect_timer, &QTimer::timeout, this, &PsWrapLink::connectSignal);
 	d->pad_timer.setInterval(100);
 	connect(&d->pad_timer, &QTimer::timeout, this, &PsWrapLink::pollPad);
+	d->usage_timer.setInterval(1000);
+	connect(&d->usage_timer, &QTimer::timeout, this, [this]() {
+		std::vector<QString> holders;
+		{
+			std::lock_guard<std::mutex> lock(d->m);
+			if (!d->controller.isEmpty())
+				holders.push_back(d->controller);
+			for (const QString &peer : d->co)
+				holders.push_back(peer);
+		}
+		std::vector<QString> expired;
+		bool credits_changed = false;
+		for (const QString &peer : holders) {
+			std::shared_ptr<Peer> p;
+			{
+				std::lock_guard<std::mutex> lock(d->m);
+				auto it = d->peers.find(peer);
+				if (it == d->peers.end() || it->second->ident.isEmpty())
+					continue;
+				p = it->second;
+				const QString &ident = p->ident;
+				qint64 remaining = d->usage_credits.value(ident).toLongLong();
+				remaining = std::max<qint64>(0, remaining - 1);
+				d->usage_credits.insert(ident, remaining);
+				credits_changed = true;
+				if (remaining == 0)
+					expired.push_back(peer);
+			}
+		}
+		if (credits_changed)
+			QSettings().setValue(QStringLiteral("pswrap/link_usage_credits"), d->usage_credits);
+		for (const QString &peer : expired) {
+			std::shared_ptr<Peer> p;
+			{
+				std::lock_guard<std::mutex> lock(d->m);
+				auto it = d->peers.find(peer);
+				if (it != d->peers.end())
+					p = it->second;
+			}
+			takeControllerFrom(peer);
+			emit toast(QStringLiteral("warning"),
+			           tr("Remote Play time used"),
+			           tr("%1 has no controller time remaining.").arg(p && !p->name.isEmpty() ? p->name : tr("This friend")));
+		}
+		if (credits_changed)
+			emit changed();
+	});
 	// แรงสั่น → เพื่อนที่ถือจอย ทาง "input" (unordered — ข้อความเก่าหายได้ ข้อความใหม่ทับ) · หน้าเว็บสั่นทีละ ~150 ms
 	// rumble จาก event = ค้างจนเกมสั่งใหม่ → ส่งซ้ำทุกรอบ · จาก haptics = ไม่มีเฟรมใหม่ 100 ms ถือว่าหยุด
 	d->view_req_timer.setSingleShot(true);
@@ -1348,6 +1398,9 @@ QVariantList PsWrapLink::friends() const
 		f[QStringLiteral("color")] = p->color;
 		f[QStringLiteral("mic")] = p->mic_on;
 		f[QStringLiteral("staff")] = p->staff;
+		f[QStringLiteral("usageSeconds")] = p->ident.isEmpty()
+			? qint64(0)
+			: d->usage_credits.value(p->ident).toLongLong();
 		f[QStringLiteral("starred")] = p->starred;
 		f[QStringLiteral("camBlocked")] = p->cam_blocked.load();
 		f[QStringLiteral("canStar")] = !p->ident.isEmpty() && !p->staff;   // หน้าเว็บเก่าไม่ส่งรหัส = ติดดาวไม่ได้
@@ -1427,6 +1480,7 @@ void PsWrapLink::start()
 	}, &d->voice);
 	d->voice_timer.start();
 	d->level_timer.start();
+	d->usage_timer.start();
 	connectSignal();
 	d->lan_ip = defaultRouteIp();   // candidate host ที่เก็บไว้ (การ์ดอื่น — Tailscale/Hyper-V/VPN — ทิ้ง)
 	qCInfo(pswrapLink) << "Link on" << (d->lan_ip.isEmpty() ? QStringLiteral("(LAN ip unknown)") : QStringLiteral("LAN ") + d->lan_ip);
@@ -1443,6 +1497,7 @@ void PsWrapLink::stop()
 	d->pad_timer.stop();
 	d->voice_timer.stop();
 	d->level_timer.stop();
+	d->usage_timer.stop();
 	d->levels.clear();
 	d->cam_store->clear();
 	d->cams.clear();
@@ -2493,8 +2548,47 @@ void PsWrapLink::setStarred(const QString &peer, bool on)
 	emit changed();
 }
 
+void PsWrapLink::grantUsage(const QString &peer, int minutes)
+{
+	if (minutes <= 0)
+		return;
+	std::shared_ptr<Peer> p;
+	{
+		std::lock_guard<std::mutex> lock(d->m);
+		auto it = d->peers.find(peer);
+		if (it == d->peers.end() || it->second->ident.isEmpty() || it->second->staff)
+			return;
+		p = it->second;
+	}
+	{
+		std::lock_guard<std::mutex> lock(d->m);
+		const qint64 added = static_cast<qint64>(minutes) * 60;
+		const qint64 remaining = d->usage_credits.value(p->ident).toLongLong();
+		d->usage_credits.insert(p->ident, remaining + added);
+	}
+	QSettings().setValue(QStringLiteral("pswrap/link_usage_credits"), d->usage_credits);
+	emit toast(QStringLiteral("success"),
+	           tr("Remote Play time granted"),
+	           tr("%1: +%2 minutes").arg(p->name.isEmpty() ? tr("Friend") : p->name).arg(minutes));
+	emit changed();
+}
+
 void PsWrapLink::giveController(const QString &peer)
 {
+	bool no_credit = false;
+	{
+		std::lock_guard<std::mutex> lock(d->m);
+		auto it = d->peers.find(peer);
+		if (it == d->peers.end() || it->second->ident.isEmpty())
+			return;
+		no_credit = d->usage_credits.value(it->second->ident).toLongLong() <= 0;
+	}
+	if (no_credit) {
+		emit toast(QStringLiteral("warning"),
+		           tr("No Remote Play time"),
+		           tr("Grant time to this friend before giving the controller."));
+		return;
+	}
 	bool on_stage = false;
 	{
 		std::lock_guard<std::mutex> lock(d->m);
@@ -2576,6 +2670,13 @@ void PsWrapLink::takeControllerFrom(const QString &peer)
 
 void PsWrapLink::addCoHolder(const QString &peer)
 {
+	{
+		std::lock_guard<std::mutex> lock(d->m);
+		auto it = d->peers.find(peer);
+		if (it == d->peers.end() || it->second->ident.isEmpty()
+		    || d->usage_credits.value(it->second->ident).toLongLong() <= 0)
+			return;
+	}
 	bool on_stage = false;
 	std::shared_ptr<Peer> target;
 	{
