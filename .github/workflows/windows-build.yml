@@ -20,6 +20,18 @@ jobs:
           msystem: MINGW64
           update: true
 
+      - name: Diagnose MSYS2 packages
+        shell: pwsh
+        run: |
+          & "C:\msys64\usr\bin\bash.exe" -lc '
+            echo "=== MSYS2 environment ==="
+            echo $MSYSTEM
+            echo "=== Package availability ==="
+            pacman -Ss hidapi
+            pacman -Ss rnnoise
+            pacman -Ss qt6-multimedia
+          '
+
       - name: Setup dependencies
         shell: pwsh
         run: ./scripts/setup-msys2.ps1
@@ -43,3 +55,5 @@ jobs:
           path: dist/PS-WRAP/
           if-no-files-found: error
           retention-days: 14
+
+      
