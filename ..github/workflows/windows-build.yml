@@ -1,0 +1,45 @@
+
+name: PS-WRAP Windows Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+
+      - name: Setup dependencies
+        shell: pwsh
+        run: ./scripts/setup-msys2.ps1
+
+      - name: Setup extra dependencies
+        shell: pwsh
+        run: ./scripts/setup-extra-deps.ps1
+
+      - name: Build PS-WRAP
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: Deploy portable
+        shell: pwsh
+        run: ./scripts/deploy.ps1
+
+      - name: Upload portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS-WRAP-Windows-Portable
+          path: dist/PS-WRAP/
+          if-no-files-found: error
+          retention-days: 14
