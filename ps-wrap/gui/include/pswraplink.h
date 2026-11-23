@@ -91,6 +91,9 @@ public:
 	Q_INVOKABLE void resetInvite();
 	Q_INVOKABLE void giveController(const QString &peer);
 	Q_INVOKABLE void takeController();
+	// Tiempo de uso remoto: el admin suma créditos por usuario (identidad persistente).
+	// Se consume cada segundo mientras el usuario tenga el control.
+	Q_INVOKABLE void grantUsage(const QString &peer, int minutes);
 	// ดึงจอยคืนจากคนเดียว (กลุ่มดาวถือร่วมกันได้) — คนอื่นที่ถืออยู่ยังเล่นต่อ
 	Q_INVOKABLE void takeControllerFrom(const QString &peer);
 	Q_INVOKABLE void kick(const QString &peer);
